@@ -176,8 +176,7 @@ def nanaverage(data, weights=None, **kwargs):
     return _nanaverage
 
 
-# # TODO: Replace with method from meteokit
-## DEPRACTED latitude_weights method. xarray.Weights can handle nans, therefore bespoke method not needed
+## DEPRECATED latitude_weights method. xarray.Weights can handle nans, therefore bespoke method not needed
 # def latitude_weights(latitudes, data_shape=None, lat_dims=None):
 #     """Function to return latitude weights.
 
@@ -241,7 +240,7 @@ def standard_weights(dataarray: xr.DataArray, weights: str, **kwargs):
     raise NotImplementedError(f"The selected weights method is not recognised or implemented yet: {weights}.")
 
 
-def latitude_weights(dataarray: xr.DataArray, lat_key: str | list | None = None):
+def latitude_weights(dataarray: xr.DataArray, lat_key: str | None = None):
     """
     xarray.DataArray wrapper for latitude_weights.
 
@@ -249,11 +248,6 @@ def latitude_weights(dataarray: xr.DataArray, lat_key: str | list | None = None)
     """
     if lat_key is None:
         lat_key = get_dim_key(dataarray, "y")
-    elif isinstance(lat_key, list):
-        for lat in lat_key:
-            if lat in dataarray.coords:
-                lat_key = lat
-                break
 
     lat_array = dataarray.coords.get(lat_key)
     if lat_array is not None:
