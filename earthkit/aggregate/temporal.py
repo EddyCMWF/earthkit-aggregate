@@ -1,16 +1,70 @@
 import logging
 import typing as T
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 
 from earthkit.aggregate import tools
+from earthkit.aggregate.general import how_label_rename, resample
 from earthkit.aggregate.general import reduce as _reduce
-from earthkit.aggregate.general import resample
 from earthkit.aggregate.general import rolling_reduce as _rolling_reduce
 from earthkit.aggregate.tools import groupby_time
 
 logger = logging.getLogger(__name__)
+
+
+def standardise_time(
+    dataarray: xr.Dataset | xr.DataArray,
+    target_format: str = "%Y-%m-%d %H:%M:%S",
+) -> xr.Dataset | xr.DataArray:
+    """
+    Convert time coordinates to a standard format using the Gregorian calendar.
+
+    This function is helpful when combining data from different sources with
+    different time standards or calendars - for example, when combining data
+    which uses a 360-day calendar with data which uses a Gregorian calendar. All
+    data passed into this function will be converted to a standard Gregorian
+    calendar format.
+
+    Parameters
+    ----------
+    dataarray : xr.Dataset or xr.DataArray
+        Data object with a time coordinate to be standardised.
+    target_format : str, optional
+        Datetime format to use when creating the standardised datetime object.
+        This can be used to change the resolution of the datetime object - for
+        example, "%Y-%m-%d" will reduce to daily resolution - or to fix elements
+        of the datetime object - for example, "%Y-%m-15" would reduce to monthly
+        resolution and fix the date to the 15th of each month.
+
+    Returns
+    -------
+    xr.Dataset or xr.DataArray
+        Data object with the time coordinate standardised to the specified
+        format.
+    """
+    try:
+        source_times = [time_value.strftime(target_format) for time_value in dataarray.time.values]
+    except AttributeError:
+        source_times = [
+            pd.to_datetime(time_value).strftime(target_format) for time_value in dataarray.time.values
+        ]
+
+    standardised_times = np.array(
+        [pd.to_datetime(time_string).to_datetime64() for time_string in source_times]
+    )
+
+    dataarray = dataarray.assign_coords({"time": standardised_times})
+
+    history = dataarray.attrs.get("history", "")
+    history += (
+        "The time coordinate of this data has been standardised with "
+        "earthkit.aggregate.temporal.standardise_time."
+    )
+    dataarray = dataarray.assign_attrs({"history": history})
+
+    return dataarray
 
 
 @tools.time_dim_decorator
@@ -56,6 +110,9 @@ def reduce(
         A data array with reduce dimensions removed.
 
     """
+    if "frequency" in kwargs:
+        return resample(dataarray, *args, time_dim=time_dim, **kwargs)
+
     reduce_dims = tools.ensure_list(kwargs.get("dim", []))
     if time_dim is not None and time_dim not in reduce_dims:
         reduce_dims.append(time_dim)
@@ -299,12 +356,10 @@ def sum(
 
 
 @tools.time_dim_decorator
-@tools.how_label_decorator(label_prefix="daily_")
 def daily_reduce(
     dataarray: xr.Dataset | xr.DataArray,
     how: str | T.Callable = "mean",
     time_dim: str | None = None,
-    how_label: str | None = None,
     **kwargs,
 ):
     """
@@ -337,13 +392,13 @@ def daily_reduce(
     -------
     xr.DataArray
     """
-    rename_extra = {}
     # If time_dim in dimensions then use resample, this should be faster.
     #  At present, performance differences are small, but resampling can be improved by handling as
-    #  a pandas dataframes. reample function should be updated to do this.
-    #  NOTE: force_groupby is an undocumented kwarg for debug purposes
+    #  a pandas dataframes. resample function should be updated to do this.
+    #  NOTE: force_groupby is an intentionally undocumented kwarg for debug purposes
     if time_dim in dataarray.dims and not kwargs.pop("force_groupby", False):
-        red_array = resample(dataarray, frequency="D", dim=time_dim, how=how, **kwargs)
+        kwargs.setdefault("frequency", "D")
+        red_array = resample(dataarray, time_dim=time_dim, how=how, **kwargs)
     else:
         # Otherwise, we groupby, with specifics set up for daily and handling both datetimes and timedeltas
         if dataarray[time_dim].dtype in ["<M8[ns]"]:  # datetime
@@ -368,15 +423,8 @@ def daily_reduce(
             red_array[group_key] = pd.DatetimeIndex(red_array[group_key].values)
         except TypeError:
             logger.warning(f"Failed to convert {group_key} to datetime, it may already be a datetime object")
-        rename_extra = {group_key: time_dim}
 
-    if how_label is not None:
-        # Update variable names, depends on dataset or dataarray format
-        if isinstance(red_array, xr.Dataset):
-            renames = {**{data_arr: f"{data_arr}_{how_label}" for data_arr in red_array}, **rename_extra}
-            red_array = red_array.rename(renames)
-        else:
-            red_array = red_array.rename(f"{red_array.name}_{how_label}", **rename_extra)
+        red_array = how_label_rename(red_array, kwargs.get("how_label"))
 
     return red_array
 
@@ -538,12 +586,10 @@ def daily_sum(dataarray: xr.Dataset | xr.DataArray, *args, **kwargs):
 
 
 @tools.time_dim_decorator
-@tools.how_label_decorator(label_prefix="monthly_")
 def monthly_reduce(
     dataarray: xr.Dataset | xr.DataArray,
     how: str | T.Callable = "mean",
     time_dim: str | None = None,
-    how_label: str | None = None,
     **kwargs,
 ):
     """
@@ -577,17 +623,16 @@ def monthly_reduce(
     -------
     xr.DataArray
     """
-    rename_extra = {}
     # If time_dim in dimensions then use resample, this should be faster.
     #  At present, performance differences are small, but resampling can be improved by handling as
     #  a pandas dataframes. reample function should be updated to do this.
     #  NOTE: force_groupby is an undocumented kwarg for debug purposes
     if time_dim in dataarray.dims and not kwargs.pop("force_groupby", False):
-        red_array = resample(dataarray, frequency="ME", dim=time_dim, how=how, **kwargs)
+        kwargs.setdefault("frequency", "MS")
+        red_array = resample(dataarray, time_dim=time_dim, how=how, **kwargs)
     else:
-        # Otherwise, we groupby, with specifics set up for daily and handling both datetimes and timedeltas
+        # Otherwise, we groupby, with specifics set up for monthly and handling both datetimes and timedeltas
         if dataarray[time_dim].dtype in ["<M8[ns]"]:  # datetime
-            group_key = "date"
             # create a year-month coordinate
             years = dataarray[f"{time_dim}.year"]
             months = dataarray[f"{time_dim}.month"]
@@ -614,15 +659,8 @@ def monthly_reduce(
             red_array = grouped_data.reduce(how, **kwargs)
         # Remove the year_months coordinate
         del red_array["year_months"]
-        rename_extra = {group_key: time_dim}
 
-    if how_label is not None:
-        # Update variable names, depends on dataset or dataarray format
-        if isinstance(red_array, xr.Dataset):
-            renames = {**{data_arr: f"{data_arr}_{how_label}" for data_arr in red_array}, **rename_extra}
-            red_array = red_array.rename(renames)
-        else:
-            red_array = red_array.rename(f"{red_array.name}_{how_label}", **rename_extra)
+        red_array = how_label_rename(red_array, kwargs.get("how_label"))
 
     return red_array
 
